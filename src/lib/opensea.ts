@@ -4,8 +4,11 @@ import { getNftFallbackImage } from "./utils";
 const OPENSEA_API_BASE = "https://api.opensea.io/api/v2";
 const FETCH_TIMEOUT_MS = 15_000;
 const IMAGE_ENRICH_CONCURRENCY = 4;
-const REFINEMENT_CAP = 10;
+/** Max per-NFT /best lookups per collection (rate-limit budget). */
+const REFINEMENT_CAP = 40;
 const MAX_SANITY_RATIO = 5;
+/** Loose pre-screen multiplier — cast a wide net, then verify every deal via /best. */
+const PRESCREEN_THRESHOLD_FACTOR = 0.75;
 
 export interface RateLimitInfo {
   limit: number;
@@ -285,10 +288,13 @@ async function fetchBestListings(
 }
 
 const MIN_SIGNIFICANT_BID_ETH = 0.1;
-const BID_CLUSTER_DROP_RATIO = 1.2;
+/** Gap ratio that separates stale outlier clusters from the floor bid group. */
+const OUTLIER_CLUSTER_RATIO = 1.35;
+/** Top two bids within this ratio are considered the same cluster. */
+const FLOOR_CLUSTER_TOLERANCE = 1.25;
 
 function collectionBestNetBid(offers: OpenSeaOffer[]): number {
-  const nets = offers
+  let nets = offers
     .map(netOfferAmount)
     .filter((n) => n >= MIN_SIGNIFICANT_BID_ETH)
     .sort((a, b) => b - a);
@@ -296,11 +302,22 @@ function collectionBestNetBid(offers: OpenSeaOffer[]): number {
   if (nets.length === 0) return 0;
   if (nets.length === 1) return nets[0];
 
-  const scanDepth = Math.min(nets.length - 1, 8);
-  for (let i = 0; i < scanDepth; i++) {
-    if (nets[i] > nets[i + 1] * BID_CLUSTER_DROP_RATIO) {
-      return nets[i + 1];
+  // Peel off stale high clusters until the top two bids sit in the same floor group.
+  while (nets.length > 1) {
+    if (nets[0] <= nets[1] * FLOOR_CLUSTER_TOLERANCE) {
+      return nets[0];
     }
+
+    const scanDepth = Math.min(nets.length - 1, 8);
+    let cutAt = -1;
+    for (let i = 0; i < scanDepth; i++) {
+      if (nets[i] > nets[i + 1] * OUTLIER_CLUSTER_RATIO) {
+        cutAt = i;
+        break;
+      }
+    }
+    if (cutAt < 0) return nets[0];
+    nets = nets.slice(cutAt + 1);
   }
 
   return nets[0];
@@ -595,26 +612,29 @@ export async function fetchDealsForCollection(
       const askPrice = listingAskPrice(listing);
       if (askPrice <= 0) continue;
 
-      const ratio = collectionBestOffer / askPrice;
-      if (ratio >= threshold && ratio <= MAX_SANITY_RATIO) {
+      const prescreenRatio = collectionBestOffer / askPrice;
+      const prescreenMin = threshold * PRESCREEN_THRESHOLD_FACTOR;
+      if (prescreenRatio >= prescreenMin && prescreenRatio <= MAX_SANITY_RATIO) {
         candidates.push({
           listing,
           tokenId,
           askPrice,
           bestOffer: collectionBestOffer,
-          ratio,
+          ratio: prescreenRatio,
         });
       }
     }
 
+    // Cheapest asks first — prioritize floor items for the /best verification budget.
     candidates.sort(
       (a, b) =>
-        b.ratio - a.ratio ||
         a.askPrice - b.askPrice ||
+        b.ratio - a.ratio ||
         a.tokenId.localeCompare(b.tokenId)
     );
 
     let refined = 0;
+    const verified: DealCandidate[] = [];
     const toRefine = candidates.slice(0, REFINEMENT_CAP);
 
     for (const candidate of toRefine) {
@@ -629,23 +649,24 @@ export async function fetchDealsForCollection(
         collectedRateLimits.push(refinedResult.rateLimit);
       }
       if (refinedResult.error) {
-        // Stop refining but keep deals found so far with collection-level bids.
         break;
       }
 
-      if (refinedResult.bestOffer > 0) {
-        candidate.bestOffer = refinedResult.bestOffer;
-        candidate.ratio = refinedResult.bestOffer / candidate.askPrice;
+      if (refinedResult.bestOffer <= 0) continue;
+
+      const ratio = refinedResult.bestOffer / candidate.askPrice;
+      if (ratio >= threshold && ratio <= MAX_SANITY_RATIO) {
+        verified.push({
+          ...candidate,
+          bestOffer: refinedResult.bestOffer,
+          ratio,
+        });
       }
 
       await sleep(90);
     }
 
-    const qualifying = candidates.filter(
-      (c) => c.ratio >= threshold && c.ratio <= MAX_SANITY_RATIO
-    );
-
-    const deals = qualifying.map((c) => buildDeal(c, slug, ethUsd));
+    const deals = verified.map((c) => buildDeal(c, slug, ethUsd));
 
     deals.sort(
       (a, b) => b.ratio - a.ratio || a.tokenId.localeCompare(b.tokenId)
