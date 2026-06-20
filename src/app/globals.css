@@ -1,26 +1,123 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  /* Uber Inspired — black & white duet (light base) */
+  --primary: #000000;           /* Ink Black — primary CTA */
+  --on-primary: #ffffff;
+  --ink: #000000;
+  --body: #5e5e5e;
+  --mute: #afafaf;
+  --hairline-mid: #4b4b4b;
+  --canvas: #ffffff;
+  --canvas-soft: #efefef;
+  --canvas-softer: #f3f3f3;
+  --surface-pressed: #e2e2e2;
+  --link: #0000ee;
+  --on-dark: #ffffff;
+  --black-elevated: #282828;
+
+  /* Aliases for existing code */
+  --bg: var(--canvas);
+  --bg-subtle: var(--canvas-soft);
+  --fg: var(--ink);
+  --fg-muted: var(--body);
+  --card: var(--canvas);
+  --card-subtle: var(--canvas-soft);
+  --border: #e5e5e5;
+  --border-strong: var(--hairline-mid);
+  --accent: var(--primary);       /* map to black for primary actions */
+  --accent-soft: var(--canvas-soft);
+  --warning: var(--body);
+  --warning-soft: var(--canvas-soft);
+  --danger-soft: #fee2e2;
+  --success-soft: #dcfce7;
+
+  /* Hover states tuned for light (Uber) */
+  --primary-hover: #1a1a1a;
+  --subtle-hover: var(--surface-pressed);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+.dark {
+  color-scheme: dark;
+
+  /* Polarity-flipped black canvas for dark mode */
+  --primary: #ffffff;           /* white pills on dark */
+  --on-primary: #000000;
+  --ink: #ffffff;
+  --body: #afafaf;
+  --mute: #6b6b6b;
+  --hairline-mid: #4b4b4b;
+  --canvas: #000000;
+  --canvas-soft: #1f1f1f;
+  --canvas-softer: #2a2a2a;
+  --surface-pressed: #3a3a3a;
+  --link: #0000ee;
+  --on-dark: #ffffff;
+  --black-elevated: #282828;
+
+  --bg: var(--canvas);
+  --bg-subtle: var(--canvas-soft);
+  --fg: var(--ink);
+  --fg-muted: var(--body);
+  --card: var(--canvas-soft);
+  --card-subtle: var(--canvas-softer);
+  --border: #3a3a3a;
+  --border-strong: #4b4b4b;
+  --accent: var(--primary);
+  --accent-soft: var(--canvas-soft);
+
+  /* Hover states for dark polarity */
+  --primary-hover: #e5e5e5;
+  --subtle-hover: var(--surface-pressed);
+}
+
+html {
+  color-scheme: light dark;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans);
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/* Elegant base surfaces */
+.surface {
+  background: var(--card);
+  border-color: var(--border);
+}
+
+.table-container::-webkit-scrollbar {
+  height: 6px;
+}
+
+.table-container::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
+
+/* Theme-aware range slider */
+input[type="range"] {
+  accent-color: var(--ink);
+}
+
+/* Refined focus for all controls */
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--fg) 20%, transparent);
+}
+
+/* Small utility for elegant section labels */
+.section-label {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--fg-muted);
 }
