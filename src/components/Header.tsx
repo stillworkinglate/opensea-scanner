@@ -4,36 +4,44 @@ import * as React from "react";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Download, RefreshCw } from "lucide-react";
+import { formatCountdown, type QuotaState } from "@/lib/utils";
 
 interface HeaderProps {
-  lastScannedLabel: string;
-  lastRateLimit: { limit: number; remaining: number; reset: number } | null;
+  lastScannedTime: string | null;
+  quota: QuotaState | null;
   isScanning: boolean;
   onScan: () => void;
   canScan: boolean;
   onExport: () => void;
   canExport: boolean;
-  cooldownSeconds?: number;
+  autoRefresh?: boolean;
+  autoRefreshPaused?: boolean;
+  nextAutoScanSeconds?: number;
   scanProgress?: { current: number; total: number; currentCollection: string };
-  scanStats?: { listingsFetched: number; candidates: number; refined: number };
 }
 
 export function Header({
-  lastScannedLabel,
-  lastRateLimit,
+  lastScannedTime,
+  quota,
   isScanning,
   onScan,
   canScan,
   onExport,
   canExport,
-  cooldownSeconds = 0,
+  autoRefresh = false,
+  autoRefreshPaused = false,
+  nextAutoScanSeconds = 0,
   scanProgress,
-  scanStats,
 }: HeaderProps) {
+  const quotaTone = quota?.isLimited
+    ? "text-amber-600 dark:text-amber-400"
+    : quota && quota.remainingPercent < 25
+      ? "text-amber-600 dark:text-amber-400"
+      : "text-[var(--fg-muted)]";
+
   return (
     <header className="h-14 border-b border-[var(--border)] bg-[var(--card)]/90 backdrop-blur z-50 flex items-center px-4 shrink-0">
       <div className="flex w-full items-center gap-3">
-        {/* Logo + Title */}
         <div className="flex items-center gap-2.5">
           <img
             src="/logo.svg"
@@ -44,34 +52,71 @@ export function Header({
         </div>
 
         <div className="ml-auto flex items-center gap-2">
-          {/* Compact last scanned - hide when never */}
-          {lastScannedLabel !== "never" && (
-            <div className="hidden md:flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--bg-subtle)] px-3 py-1 text-xs text-[var(--fg-muted)] font-mono">
-              {lastScannedLabel}
+          {lastScannedTime && (
+            <div
+              className="hidden md:flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--bg-subtle)] px-3 py-1 text-xs text-[var(--fg-muted)]"
+              title="Last successful scan"
+            >
+              <span className="text-[10px] uppercase tracking-wide">Scanned</span>
+              <span className="font-mono tabular-nums text-[var(--ink)]">
+                {lastScannedTime}
+              </span>
             </div>
           )}
 
-          {/* Live Rate Limit Bar + Cooldown (as calls fill the quota) */}
-          {lastRateLimit && (
-            <div className="hidden sm:flex items-center gap-2 text-[10px] text-[var(--fg-muted)]">
-              <span className="font-medium">Rate</span>
+          {quota && (
+            <div
+              className={`hidden sm:flex items-center gap-2 text-[10px] ${quotaTone}`}
+              title="OpenSea API quota remaining in the current window"
+            >
+              <span className="font-medium">API</span>
               <div className="relative w-20 h-2 bg-[var(--bg-subtle)] rounded-full overflow-hidden border border-[var(--border)]">
-                {(() => {
-                  const usage = Math.min(100, ((lastRateLimit.limit - lastRateLimit.remaining) / lastRateLimit.limit) * 100);
-                  const color = (lastRateLimit.remaining < 8 || cooldownSeconds > 0) ? 'bg-red-500' : 'bg-[var(--ink)]';
-                  return <div className={`h-2 transition-all ${color}`} style={{ width: `${usage}%` }} />;
-                })()}
+                <div
+                  className={`h-2 transition-all duration-500 ${
+                    quota.isLimited
+                      ? "bg-amber-500"
+                      : quota.remainingPercent < 25
+                        ? "bg-amber-500"
+                        : "bg-[var(--ink)]"
+                  }`}
+                  style={{ width: `${quota.remainingPercent}%` }}
+                />
               </div>
-              <span className="font-mono tabular-nums">{lastRateLimit.remaining}/{lastRateLimit.limit}</span>
-              {cooldownSeconds > 0 && (
-                <span className="font-mono text-amber-600 dark:text-amber-400 tabular-nums" title="Time until rate limit resets">
-                  ~{Math.floor(cooldownSeconds / 60)}m {cooldownSeconds % 60}s
+              <span className="font-mono tabular-nums">
+                {quota.remaining}/{quota.limit}
+              </span>
+              {quota.isLimited && quota.cooldownSeconds > 0 && (
+                <span className="font-mono tabular-nums">
+                  · resets {formatCountdown(quota.cooldownSeconds)}
+                </span>
+              )}
+              {quota.isRecovered && !isScanning && (
+                <span className="text-emerald-600 dark:text-emerald-400 font-medium">
+                  · ready
                 </span>
               )}
             </div>
           )}
 
-          {/* Scan progress */}
+          {autoRefresh && !isScanning && (
+            <div className="hidden lg:flex items-center gap-1 text-[10px] text-[var(--fg-muted)]">
+              {autoRefreshPaused ? (
+                <span className="text-amber-600 dark:text-amber-400 font-medium">
+                  Auto paused
+                  {quota?.cooldownSeconds
+                    ? ` · ${formatCountdown(quota.cooldownSeconds)}`
+                    : ""}
+                </span>
+              ) : nextAutoScanSeconds > 0 ? (
+                <span className="font-mono tabular-nums">
+                  Next auto {formatCountdown(nextAutoScanSeconds)}
+                </span>
+              ) : (
+                <span className="font-medium text-[var(--ink)]">Auto on</span>
+              )}
+            </div>
+          )}
+
           {isScanning && scanProgress && scanProgress.total > 0 && (
             <div className="hidden md:flex items-center gap-2 text-[10px] text-[var(--fg-muted)] max-w-[200px]">
               <div className="relative w-16 h-2 bg-[var(--bg-subtle)] rounded-full overflow-hidden border border-[var(--border)] shrink-0">
@@ -84,21 +129,15 @@ export function Header({
             </div>
           )}
 
-          {/* Post-scan stats */}
-          {!isScanning && scanStats && scanStats.listingsFetched > 0 && (
-            <div className="hidden lg:flex items-center gap-1 text-[10px] text-[var(--fg-muted)] font-mono">
-              {scanStats.listingsFetched} listings · {scanStats.candidates} matched
-            </div>
-          )}
-
-          {/* Primary actions - consistent default size */}
-          <Button
-            onClick={onScan}
-            disabled={!canScan}
-            className="gap-2"
-          >
-            <RefreshCw className={`h-4 w-4 ${isScanning ? "animate-spin" : ""}`} />
-            {isScanning ? "SCANNING" : "SCAN"}
+          <Button onClick={onScan} disabled={!canScan} className="gap-2">
+            <RefreshCw
+              className={`h-4 w-4 ${isScanning ? "animate-spin" : ""}`}
+            />
+            {isScanning
+              ? "SCANNING"
+              : quota?.isLimited
+                ? "WAIT"
+                : "SCAN"}
           </Button>
 
           <Button

@@ -7,7 +7,11 @@ import { Sidebar } from "@/components/Sidebar";
 import { DealTable } from "@/components/DealTable";
 import { Header } from "@/components/Header";
 import { FiltersBar } from "@/components/FiltersBar";
-import { timeAgo } from "@/lib/utils";
+import {
+  formatScanTime,
+  formatCountdown,
+  getQuotaState,
+} from "@/lib/utils";
 import { toast } from "sonner";
 import { AlertTriangle, ExternalLink } from "lucide-react";
 
@@ -39,7 +43,10 @@ export default function OpenSeaScannerDashboard() {
     refined: number;
   } | null>(null);
 
-  const [cooldownSeconds, setCooldownSeconds] = React.useState(0);
+  const [nowSec, setNowSec] = React.useState(() =>
+    Math.floor(Date.now() / 1000)
+  );
+
   const [scanProgress, setScanProgress] = React.useState({
     current: 0,
     total: 0,
@@ -57,6 +64,10 @@ export default function OpenSeaScannerDashboard() {
 
   const intervalRef = React.useRef<NodeJS.Timeout | null>(null);
   const isScanningRef = React.useRef(false);
+  const wasQuotaLimitedRef = React.useRef(false);
+  const [nextAutoScanAtSec, setNextAutoScanAtSec] = React.useState<number | null>(
+    null
+  );
   const lastRateLimitRef = React.useRef<{
     remaining: number;
     reset: number;
@@ -138,15 +149,19 @@ export default function OpenSeaScannerDashboard() {
     }
     if (isScanningRef.current) return;
 
-    const rate = lastRateLimitRef.current;
-    const nowSec = Math.floor(Date.now() / 1000);
-    const stillInCooldown =
-      rate && rate.remaining < 8 && nowSec < rate.reset;
-    if (stillInCooldown) {
-      const resetIn = Math.max(0, rate.reset - nowSec);
+    const quota = getQuotaState(
+      lastRateLimitRef.current,
+      Math.floor(Date.now() / 1000)
+    );
+    if (quota && !quota.canScan) {
       toast.warning(
-        `Rate limit buffer low (${rate.remaining} left). Waiting for reset.`,
-        { description: `Resets in ~${Math.ceil(resetIn / 60)}m` }
+        `OpenSea quota low (${quota.remaining} calls left).`,
+        {
+          description:
+            quota.cooldownSeconds > 0
+              ? `Resets in ${formatCountdown(quota.cooldownSeconds)}`
+              : "Try again shortly.",
+        }
       );
       return;
     }
@@ -200,12 +215,6 @@ export default function OpenSeaScannerDashboard() {
         currentRate = data.rateLimit;
         setLastRateLimit(currentRate);
         lastRateLimitRef.current = currentRate;
-        const now = Math.floor(Date.now() / 1000);
-        setCooldownSeconds(
-          currentRate.remaining < 8
-            ? Math.max(0, currentRate.reset - now)
-            : 0
-        );
       }
 
       if (data.ethPriceUsd && data.ethPriceUsd > 0) {
@@ -255,46 +264,96 @@ export default function OpenSeaScannerDashboard() {
     }
   }, []);
 
+  const refreshIntervalMs = React.useMemo(() => {
+    if (refreshInterval === "30s") return 30_000;
+    if (refreshInterval === "60s") return 60_000;
+    if (refreshInterval === "5min") return 5 * 60_000;
+    return null;
+  }, [refreshInterval]);
+
+  // Single clock tick — drives quota recovery and auto-refresh scheduling.
+  React.useEffect(() => {
+    const tick = () => setNowSec(Math.floor(Date.now() / 1000));
+    tick();
+    const iv = setInterval(tick, 1000);
+    return () => clearInterval(iv);
+  }, []);
+
+  const quota = React.useMemo(
+    () => getQuotaState(lastRateLimit, nowSec),
+    [lastRateLimit, nowSec]
+  );
+
+  const scheduleNextAutoScan = React.useCallback((delayMs: number) => {
+    setNextAutoScanAtSec(
+      Math.floor(Date.now() / 1000) + Math.ceil(delayMs / 1000)
+    );
+  }, []);
+
   React.useEffect(() => {
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
     }
 
-    if (!autoRefresh || refreshInterval === "manual") return;
+    if (!autoRefresh || !refreshIntervalMs) {
+      return;
+    }
 
-    const getMs = () => {
-      if (refreshInterval === "30s") return 30_000;
-      if (refreshInterval === "60s") return 60_000;
-      return 5 * 60 * 1000;
-    };
+    const boot = setTimeout(() => scheduleNextAutoScan(refreshIntervalMs), 0);
 
     intervalRef.current = setInterval(() => {
-      const nowSec = Math.floor(Date.now() / 1000);
-      const rate = lastRateLimitRef.current;
-      const quotaLow =
-        rate && rate.remaining < 8 && nowSec < rate.reset;
-      if (!isScanningRef.current && !quotaLow) {
-        performScan();
+      const tickNow = Math.floor(Date.now() / 1000);
+      const currentQuota = getQuotaState(lastRateLimitRef.current, tickNow);
+
+      if (isScanningRef.current) return;
+
+      if (currentQuota && !currentQuota.canScan) {
+        if (currentQuota.cooldownSeconds > 0) {
+          scheduleNextAutoScan(currentQuota.cooldownSeconds * 1000);
+        }
+        return;
       }
-    }, getMs());
+
+      performScan();
+      scheduleNextAutoScan(refreshIntervalMs);
+    }, refreshIntervalMs);
 
     return () => {
+      clearTimeout(boot);
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
         intervalRef.current = null;
       }
     };
-  }, [autoRefresh, refreshInterval, performScan]);
+  }, [
+    autoRefresh,
+    refreshIntervalMs,
+    performScan,
+    scheduleNextAutoScan,
+  ]);
 
+  // Resume auto-refresh as soon as the OpenSea window resets.
   React.useEffect(() => {
-    if (!lastRateLimit?.reset || lastRateLimit.remaining >= 8) return;
-    const iv = setInterval(() => {
-      const now = Math.floor(Date.now() / 1000);
-      setCooldownSeconds(Math.max(0, lastRateLimit.reset - now));
-    }, 1000);
-    return () => clearInterval(iv);
-  }, [lastRateLimit]);
+    const limited = quota?.isLimited ?? false;
+    if (
+      autoRefresh &&
+      refreshIntervalMs &&
+      wasQuotaLimitedRef.current &&
+      !limited &&
+      !isScanningRef.current
+    ) {
+      performScan();
+      scheduleNextAutoScan(refreshIntervalMs);
+    }
+    wasQuotaLimitedRef.current = limited;
+  }, [
+    quota?.isLimited,
+    autoRefresh,
+    refreshIntervalMs,
+    performScan,
+    scheduleNextAutoScan,
+  ]);
 
   const exportCSV = () => {
     if (!filteredDeals.length) {
@@ -347,26 +406,32 @@ export default function OpenSeaScannerDashboard() {
     setActiveSort(preset as "highest-ratio" | "lowest-delta" | "highest-ask");
   };
 
-  const lastScannedLabel = lastScanned ? timeAgo(lastScanned) : "never";
+  const lastScannedTime = lastScanned ? formatScanTime(lastScanned) : null;
 
-  const quotaOk =
-    !lastRateLimit || lastRateLimit.remaining >= 8 || cooldownSeconds <= 0;
-  const canScan = !isScanning && collections.length > 0 && quotaOk;
+  const canScan =
+    !isScanning && collections.length > 0 && (quota?.canScan ?? true);
   const canExport = filteredDeals.length > 0;
+  const autoRefreshActive = autoRefresh && refreshInterval !== "manual";
+  const nextAutoScanSeconds =
+    autoRefreshActive && nextAutoScanAtSec
+      ? Math.max(0, nextAutoScanAtSec - nowSec)
+      : 0;
+  const autoRefreshPaused = Boolean(autoRefreshActive && quota?.isLimited);
 
   return (
     <div className="flex h-screen flex-col overflow-hidden">
       <Header
-        lastScannedLabel={lastScannedLabel}
-        lastRateLimit={lastRateLimit}
+        lastScannedTime={lastScannedTime}
+        quota={quota}
         isScanning={isScanning}
         onScan={performScan}
         canScan={canScan}
         onExport={exportCSV}
         canExport={canExport}
-        cooldownSeconds={cooldownSeconds}
+        autoRefresh={autoRefreshActive}
+        autoRefreshPaused={autoRefreshPaused}
+        nextAutoScanSeconds={nextAutoScanSeconds}
         scanProgress={scanProgress}
-        scanStats={lastScanStats || undefined}
       />
 
       <div className="flex flex-1 overflow-hidden flex-col md:flex-row">
@@ -420,6 +485,15 @@ export default function OpenSeaScannerDashboard() {
                 ? `${collections.length} collection${collections.length === 1 ? "" : "s"}`
                 : "No collections"}
             </span>
+            {lastScanStats && lastScanStats.listingsFetched > 0 && (
+              <>
+                <span>•</span>
+                <span className="font-mono tabular-nums">
+                  {lastScanStats.listingsFetched} listings ·{" "}
+                  {lastScanStats.candidates} matched
+                </span>
+              </>
+            )}
             {ethPriceUsd != null && (
               <>
                 <span>•</span>
